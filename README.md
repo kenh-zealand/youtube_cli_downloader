@@ -5,8 +5,9 @@ downloading YouTube videos as **MP4** (choose a resolution) or extracting
 audio as **MP3** (choose a bitrate). It only ever offers qualities that
 actually exist for the video you give it.
 
-Requires `yt-dlp` and `ffmpeg` on PATH — both are already installed on this
-machine.
+Requires `yt-dlp` and `ffmpeg` on PATH (both are already installed on this
+machine), plus the `psutil` package for the pause/stop controls below
+(`pip install psutil`).
 
 ## Usage
 
@@ -53,6 +54,18 @@ python ytdl.py <playlist_url> --playlist -f mp3 -q 192
 
 Files are saved as `<Title>.mp4` / `<Title>.mp3` in the output folder
 (playlists get their own subfolder, numbered by track order).
+
+## While a download is running
+
+| Key | Effect |
+|---|---|
+| `P` | Pause / resume the download in place |
+| `S` (or `Q`) | Stop the download |
+
+Stopping keeps the partial file on disk — run the exact same command again
+and yt-dlp will resume from where it left off instead of starting over.
+(Requires a real console window and `psutil`; if either is missing, the
+download just runs straight through with no interactive controls.)
 
 ## Notes
 

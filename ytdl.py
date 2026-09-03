@@ -14,7 +14,12 @@ Usage:
     python ytdl.py <url> -f mp3 -q 192 -o D:\Music     fully non-interactive, custom folder
     python ytdl.py <playlist_url> --playlist -f mp3     download a whole playlist as mp3
 
-Requires yt-dlp and ffmpeg on PATH (both are already installed on this machine).
+While a download is running, press:
+    P   pause / resume
+    S   stop (partial file is kept - rerun the same command to resume it)
+
+Requires yt-dlp and ffmpeg on PATH (both are already installed on this machine),
+plus the 'psutil' package for pause/stop (pip install psutil).
 """
 
 import argparse
@@ -22,7 +27,19 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "YouTube"
 
@@ -87,6 +104,102 @@ def fmt_duration(seconds) -> str:
     return f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
 
 
+def _proc_tree(pid):
+    """The process plus any children (e.g. ffmpeg spawned by yt-dlp), if still alive."""
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return []
+    procs = [parent]
+    try:
+        procs += parent.children(recursive=True)
+    except psutil.Error:
+        pass
+    return [p for p in procs if p.is_running()]
+
+
+def _suspend_tree(pid):
+    for p in _proc_tree(pid):
+        try:
+            p.suspend()
+        except psutil.Error:
+            pass
+
+
+def _resume_tree(pid):
+    for p in _proc_tree(pid):
+        try:
+            p.resume()
+        except psutil.Error:
+            pass
+
+
+def _kill_tree(pid):
+    procs = _proc_tree(pid)
+    for p in procs:
+        try:
+            p.terminate()
+        except psutil.Error:
+            pass
+    if procs:
+        _, alive = psutil.wait_procs(procs, timeout=3)
+        for p in alive:
+            try:
+                p.kill()
+            except psutil.Error:
+                pass
+
+
+def run_download(cmd) -> tuple[int, bool]:
+    """Run the yt-dlp command, returning (returncode, was_stopped_by_user).
+
+    If psutil/msvcrt aren't available (e.g. non-Windows, or no real console
+    attached), falls back to a plain, non-interactive run.
+    """
+    if psutil is None or msvcrt is None or not sys.stdin.isatty():
+        if psutil is None:
+            print("(tip: `pip install psutil` to enable pause/stop controls)")
+        proc = subprocess.run(cmd)
+        return proc.returncode, False
+
+    print("\nControls:  [P] pause/resume    [S] stop\n")
+    proc = subprocess.Popen(cmd)
+    state = {"paused": False, "stopped": False}
+    stop_polling = threading.Event()
+
+    def listen():
+        while not stop_polling.is_set():
+            try:
+                if msvcrt.kbhit():
+                    key = msvcrt.getch().decode(errors="ignore").lower()
+                    if key == "p":
+                        if state["paused"]:
+                            _resume_tree(proc.pid)
+                            state["paused"] = False
+                            print("\n[Resumed]")
+                        else:
+                            _suspend_tree(proc.pid)
+                            state["paused"] = True
+                            print("\n[Paused] Press P to resume, S to stop.")
+                    elif key in ("s", "q"):
+                        state["stopped"] = True
+                        print("\n[Stopping...]")
+                        if state["paused"]:
+                            _resume_tree(proc.pid)  # let it unwind before killing
+                        _kill_tree(proc.pid)
+                        return
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.15)
+
+    t = threading.Thread(target=listen, daemon=True)
+    t.start()
+    returncode = proc.wait()
+    stop_polling.set()
+    t.join(timeout=1)
+    return returncode, state["stopped"]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Download YouTube videos/audio as MP4 or MP3.")
     parser.add_argument("url", nargs="?", help="YouTube video or playlist URL")
@@ -132,7 +245,7 @@ def main():
     else:
         out_template = str(out_dir / "%(title)s.%(ext)s")
 
-    cmd = [ytdlp, url, "-o", out_template, "--windows-filenames", "--no-part"]
+    cmd = [ytdlp, url, "-o", out_template, "--windows-filenames"]
     if not args.playlist:
         cmd.append("--no-playlist")
 
@@ -173,9 +286,13 @@ def main():
         print(f"\nDownloading MP3 (quality {code}) ...")
         cmd += ["-x", "--audio-format", "mp3", "--audio-quality", code]
 
-    proc = subprocess.run(cmd)
-    if proc.returncode != 0:
-        sys.exit(f"\nDownload failed (yt-dlp exit code {proc.returncode}).")
+    returncode, stopped = run_download(cmd)
+    if stopped:
+        print(f"\nStopped. Partial file kept in: {out_dir}")
+        print("Run the same command again to resume where it left off.")
+        sys.exit(0)
+    if returncode != 0:
+        sys.exit(f"\nDownload failed (yt-dlp exit code {returncode}).")
 
     print(f"\nDone. Saved under: {out_dir}")
 
