@@ -6,3 +6,6 @@ downloads/
 *.mp4
 *.webm
 *.part
+build/
+*.egg-info/
+dist/

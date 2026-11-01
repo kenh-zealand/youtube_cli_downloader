@@ -81,6 +81,12 @@ AUDIO_QUALITY_CODES = {"best": "0", "320": "320K", "256": "256K", "192": "192K",
 def find_exe(name: str) -> str:
     path = shutil.which(name)
     if not path:
+        # Programs started from a desktop menu don't always have ~/.local/bin
+        # (where pipx puts yt-dlp) on PATH, so look there explicitly too.
+        local = Path.home() / ".local" / "bin" / name
+        if local.is_file() and os.access(local, os.X_OK):
+            path = str(local)
+    if not path:
         sys.exit(f"error: '{name}' not found on PATH. Install it and try again.")
     return path
 
@@ -274,6 +280,48 @@ def run_download(cmd) -> tuple[int, bool]:
     return returncode, state["stopped"]
 
 
+DESKTOP_FILE = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "applications" / "youtube-downloader.desktop"
+
+
+def _launcher_command() -> str:
+    """Absolute command that starts this program (pipx 'ytdl' if installed, else this script)."""
+    exe = shutil.which("ytdl")
+    if exe:
+        return f'"{exe}"'
+    return f'"{sys.executable}" "{Path(__file__).resolve()}"'
+
+
+def install_desktop_entry():
+    if not sys.platform.startswith("linux"):
+        sys.exit("error: --install-desktop is only for Linux desktops")
+    DESKTOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DESKTOP_FILE.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=YouTube Downloader\n"
+        "Comment=Download YouTube videos as MP4 or audio as MP3\n"
+        "Comment[da]=Hent YouTube-videoer som MP4 eller lyd som MP3\n"
+        f"Exec={_launcher_command()} --pause-at-end\n"
+        "Icon=folder-download\n"
+        "Terminal=true\n"
+        "Categories=AudioVideo;Network;\n"
+        "Keywords=youtube;video;mp3;mp4;download;\n",
+        encoding="utf-8",
+    )
+    if shutil.which("update-desktop-database"):
+        subprocess.run(["update-desktop-database", str(DESKTOP_FILE.parent)], capture_output=True)
+    print(f"Menu shortcut installed: {DESKTOP_FILE}")
+    print("Look for 'YouTube Downloader' in your applications menu (may need a re-login to appear).")
+
+
+def uninstall_desktop_entry():
+    if DESKTOP_FILE.exists():
+        DESKTOP_FILE.unlink()
+        print(f"Menu shortcut removed: {DESKTOP_FILE}")
+    else:
+        print("No menu shortcut installed.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Download YouTube videos/audio as MP4 or MP3.")
     parser.add_argument("url", nargs="?", help="YouTube video or playlist URL")
@@ -281,7 +329,15 @@ def main():
     parser.add_argument("-q", "--quality", help="mp4: e.g. 1080p, 720p, best  |  mp3: e.g. 320, 192, best")
     parser.add_argument("-o", "--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Where to save files")
     parser.add_argument("--playlist", action="store_true", help="Download the whole playlist instead of a single video")
+    parser.add_argument("--install-desktop", action="store_true", help="Linux: add a 'YouTube Downloader' entry to the applications menu")
+    parser.add_argument("--uninstall-desktop", action="store_true", help="Linux: remove the applications-menu entry again")
+    parser.add_argument("--pause-at-end", action="store_true", help=argparse.SUPPRESS)  # used by the menu shortcut
     args = parser.parse_args()
+
+    if args.install_desktop:
+        return install_desktop_entry()
+    if args.uninstall_desktop:
+        return uninstall_desktop_entry()
 
     ytdlp = find_exe("yt-dlp")
     find_exe("ffmpeg")
@@ -371,8 +427,29 @@ def main():
     print(f"\nDone. Saved under: {out_dir}")
 
 
-if __name__ == "__main__":
+def cli():
+    """Entry point (also used by the pipx-installed `ytdl` command)."""
+    pause_at_end = "--pause-at-end" in sys.argv
+    code = 0
     try:
         main()
     except KeyboardInterrupt:
-        sys.exit("\nCancelled.")
+        print("\nCancelled.", file=sys.stderr)
+        code = 1
+    except SystemExit as e:
+        if isinstance(e.code, str):
+            print(e.code, file=sys.stderr)
+            code = 1
+        else:
+            code = e.code or 0
+    if pause_at_end:
+        # Launched from the menu shortcut: keep the terminal window open so the result can be read.
+        try:
+            input("\nPress Enter to close...")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    cli()

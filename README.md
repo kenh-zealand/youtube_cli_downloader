@@ -18,27 +18,45 @@ Install `yt-dlp` and `ffmpeg` so they're on PATH, then:
 pip install psutil
 ```
 
-### Debian / Ubuntu
+### Debian / Ubuntu (recommended: pipx)
 
 ```bash
-sudo apt install python3 python3-psutil ffmpeg pipx
+sudo apt install ffmpeg pipx git
 pipx ensurepath          # then open a new terminal
 pipx install yt-dlp
+pipx install git+https://github.com/kenh-zealand/youtube_cli_downloader
+```
+
+That's it — `ytdl` now works from any folder, and there's no code folder to
+keep track of (psutil is installed automatically).
+
+Optional: add **YouTube Downloader** to your applications menu. It opens a
+terminal window that asks for URL, format and quality, and stays open at the
+end so you can read the result:
+
+```bash
+ytdl --install-desktop       # remove again with: ytdl --uninstall-desktop
+```
+
+Keeping things up to date:
+
+```bash
+pipx upgrade yt-dlp                   # do this first if downloads suddenly fail
+pipx upgrade youtube-cli-downloader   # get new versions of this tool
 ```
 
 `yt-dlp` is installed with pipx rather than apt because YouTube changes
-often and the apt version lags behind. Keep it current with
-`pipx upgrade yt-dlp` — if downloads suddenly start failing, that's the
-first thing to try.
+often and the apt version lags behind.
 
-Make the launcher executable and (optionally) put it on your PATH as `ytdl`:
+To uninstall: `ytdl --uninstall-desktop` and `pipx uninstall youtube-cli-downloader`.
+
+#### Alternative: run from a git checkout
 
 ```bash
-chmod +x ytdl.sh
-ln -s "$PWD/ytdl.sh" ~/.local/bin/ytdl
+sudo apt install python3-psutil
+git clone https://github.com/kenh-zealand/youtube_cli_downloader
+ln -s "$PWD/youtube_cli_downloader/ytdl.sh" ~/.local/bin/ytdl
 ```
-
-Now `ytdl` works from any folder.
 
 ## Usage
 
@@ -57,7 +75,7 @@ ytdl.bat
 or on Linux:
 
 ```
-./ytdl.sh        # or just `ytdl` if you made the symlink above
+ytdl             # after pipx install (or ./ytdl.sh from a git checkout)
 ```
 
 Pass a URL and let it prompt for the rest:

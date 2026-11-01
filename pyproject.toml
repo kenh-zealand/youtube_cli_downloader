@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-cli-downloader"
+version = "1.1.0"
+description = "Friendly CLI wrapper around yt-dlp: download YouTube videos as MP4 or audio as MP3"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["psutil"]
+
+[project.scripts]
+ytdl = "ytdl:cli"
+
+[tool.setuptools]
+py-modules = ["ytdl"]
