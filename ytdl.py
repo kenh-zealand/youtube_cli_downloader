@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 YouTube Downloader - a friendly CLI wrapper around yt-dlp.
 
 Download a YouTube video as MP4 (pick a resolution) or grab just the audio
@@ -18,12 +18,13 @@ While a download is running, press:
     P   pause / resume
     S   stop (partial file is kept - rerun the same command to resume it)
 
-Requires yt-dlp and ffmpeg on PATH (both are already installed on this machine),
-plus the 'psutil' package for pause/stop (pip install psutil).
+Works on Windows and Linux (tested target: Debian). Requires yt-dlp and
+ffmpeg on PATH, plus the 'psutil' package for pause/stop (see README).
 """
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -37,11 +38,35 @@ except ImportError:
     psutil = None
 
 try:
-    import msvcrt
+    import msvcrt  # Windows
 except ImportError:
     msvcrt = None
 
-DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "YouTube"
+try:
+    import select  # Linux / macOS
+    import termios
+    import tty
+except ImportError:
+    termios = None
+
+
+def _downloads_dir() -> Path:
+    """The user's Downloads folder.
+
+    On Linux this respects XDG (e.g. 'Hentede filer' on a Danish desktop);
+    everywhere else it falls back to ~/Downloads.
+    """
+    if sys.platform.startswith("linux") and shutil.which("xdg-user-dir"):
+        try:
+            out = subprocess.run(["xdg-user-dir", "DOWNLOAD"], capture_output=True, text=True).stdout.strip()
+            if out and Path(out) != Path.home():
+                return Path(out)
+        except OSError:
+            pass
+    return Path.home() / "Downloads"
+
+
+DEFAULT_OUTPUT_DIR = _downloads_dir() / "YouTube"
 
 AUDIO_QUALITY_LABELS = [
     ("Best (highest available bitrate)", "0"),
@@ -150,28 +175,71 @@ def _kill_tree(pid):
                 pass
 
 
+class KeyReader:
+    """Non-blocking single-key reads from the console, on Windows and POSIX.
+
+    Use as a context manager: on Linux/macOS it puts the terminal in cbreak
+    mode (keys arrive immediately, without Enter and without echo) and always
+    restores the original settings on exit, even after Ctrl+C or a crash.
+    """
+
+    def __init__(self):
+        self._fd = None
+        self._old = None
+
+    @staticmethod
+    def supported() -> bool:
+        return msvcrt is not None or termios is not None
+
+    def __enter__(self):
+        if msvcrt is None and termios is not None:
+            self._fd = sys.stdin.fileno()
+            self._old = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        return self
+
+    def __exit__(self, *exc):
+        if self._old is not None:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+        return False
+
+    def read_key(self, timeout: float) -> str | None:
+        """Return a lowercase key if one was pressed within `timeout`, else None."""
+        if msvcrt is not None:
+            if msvcrt.kbhit():
+                return msvcrt.getch().decode(errors="ignore").lower()
+            time.sleep(timeout)
+            return None
+        ready, _, _ = select.select([self._fd], [], [], timeout)
+        if ready:
+            return os.read(self._fd, 1).decode(errors="ignore").lower()
+        return None
+
+
 def run_download(cmd) -> tuple[int, bool]:
     """Run the yt-dlp command, returning (returncode, was_stopped_by_user).
 
-    If psutil/msvcrt aren't available (e.g. non-Windows, or no real console
-    attached), falls back to a plain, non-interactive run.
+    If psutil or keyboard support isn't available (or there's no real
+    console attached), falls back to a plain, non-interactive run.
     """
-    if psutil is None or msvcrt is None or not sys.stdin.isatty():
+    if psutil is None or not KeyReader.supported() or not sys.stdin.isatty():
         if psutil is None:
-            print("(tip: `pip install psutil` to enable pause/stop controls)")
+            print("(tip: install psutil to enable pause/stop controls - see README)")
         proc = subprocess.run(cmd)
         return proc.returncode, False
 
     print("\nControls:  [P] pause/resume    [S] stop\n")
-    proc = subprocess.Popen(cmd)
     state = {"paused": False, "stopped": False}
     stop_polling = threading.Event()
 
-    def listen():
-        while not stop_polling.is_set():
-            try:
-                if msvcrt.kbhit():
-                    key = msvcrt.getch().decode(errors="ignore").lower()
+    with KeyReader() as keys:
+        # stdin=DEVNULL so yt-dlp/ffmpeg can't swallow our P/S keypresses.
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+
+        def listen():
+            while not stop_polling.is_set():
+                try:
+                    key = keys.read_key(0.15)
                     if key == "p":
                         if state["paused"]:
                             _resume_tree(proc.pid)
@@ -188,15 +256,21 @@ def run_download(cmd) -> tuple[int, bool]:
                             _resume_tree(proc.pid)  # let it unwind before killing
                         _kill_tree(proc.pid)
                         return
-            except (OSError, ValueError):
-                pass
-            time.sleep(0.15)
+                except (OSError, ValueError):
+                    time.sleep(0.15)
 
-    t = threading.Thread(target=listen, daemon=True)
-    t.start()
-    returncode = proc.wait()
-    stop_polling.set()
-    t.join(timeout=1)
+        t = threading.Thread(target=listen, daemon=True)
+        t.start()
+        try:
+            returncode = proc.wait()
+        except KeyboardInterrupt:
+            # Ctrl+C: make sure a paused (SIGSTOPped) yt-dlp doesn't linger.
+            _resume_tree(proc.pid)
+            _kill_tree(proc.pid)
+            raise
+        finally:
+            stop_polling.set()
+            t.join(timeout=1)
     return returncode, state["stopped"]
 
 
